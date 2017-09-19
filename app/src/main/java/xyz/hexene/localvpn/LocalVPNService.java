@@ -21,6 +21,7 @@ import android.content.Intent;
 import android.net.VpnService;
 import android.os.ParcelFileDescriptor;
 import android.support.v4.content.LocalBroadcastManager;
+import android.text.TextUtils;
 import android.util.Log;
 
 import java.io.Closeable;
@@ -35,11 +36,17 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class LocalVPNService extends VpnService
-{
+public class LocalVPNService extends VpnService {
+
+    public static final String START = "start";
+    public static final String STOP = "stop";
+
     private static final String TAG = LocalVPNService.class.getSimpleName();
     private static final String VPN_ADDRESS = "10.0.0.2"; // Only IPv4 support for now
     private static final String VPN_ROUTE = "0.0.0.0"; // Intercept everything
+
+    private static final String PROXY_ADDRESS = "192.168.1.93";
+    private static final int PROXY_PORT = 8889;
 
     public static final String BROADCAST_VPN_STATE = "xyz.hexene.localvpn.VPN_STATE";
 
@@ -58,13 +65,25 @@ public class LocalVPNService extends VpnService
     private Selector tcpSelector;
 
     @Override
-    public void onCreate()
-    {
-        super.onCreate();
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && STOP.equals(intent.getAction())) {
+            disconnect();
+            return START_NOT_STICKY;
+        } else {
+            return connect();
+        }
+    }
+
+    public static boolean isRunning() {
+        return isRunning;
+    }
+
+    private int connect() {
+        int result = START_STICKY;
+
         isRunning = true;
         setupVPN();
-        try
-        {
+        try {
             udpSelector = Selector.open();
             tcpSelector = Selector.open();
             deviceToNetworkUDPQueue = new ConcurrentLinkedQueue<>();
@@ -78,77 +97,65 @@ public class LocalVPNService extends VpnService
             executorService.submit(new TCPOutput(deviceToNetworkTCPQueue, networkToDeviceQueue, tcpSelector, this));
             executorService.submit(new VPNRunnable(vpnInterface.getFileDescriptor(),
                     deviceToNetworkUDPQueue, deviceToNetworkTCPQueue, networkToDeviceQueue));
-            LocalBroadcastManager.getInstance(this).sendBroadcast(new Intent(BROADCAST_VPN_STATE).putExtra("running", true));
+            LocalBroadcastManager.getInstance(this).sendBroadcast(
+                    new Intent(BROADCAST_VPN_STATE).putExtra("running", true));
             Log.i(TAG, "Started");
-        }
-        catch (IOException e)
-        {
+        } catch (IOException e) {
             // TODO: Here and elsewhere, we should explicitly notify the user of any errors
             // and suggest that they stop the service, since we can't do it ourselves
             Log.e(TAG, "Error starting service", e);
             cleanup();
+            result = START_NOT_STICKY;
         }
+        return result;
     }
 
-    private void setupVPN()
-    {
-        if (vpnInterface == null)
-        {
-            Builder builder = new Builder();
-            builder.addAddress(VPN_ADDRESS, 32);
-            builder.addRoute(VPN_ROUTE, 0);
-            vpnInterface = builder.setSession(getString(R.string.app_name)).setConfigureIntent(pendingIntent).establish();
-        }
-    }
-
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId)
-    {
-        return START_STICKY;
-    }
-
-    public static boolean isRunning()
-    {
-        return isRunning;
-    }
-
-    @Override
-    public void onDestroy()
-    {
-        super.onDestroy();
+    private void disconnect() {
         isRunning = false;
         executorService.shutdownNow();
         cleanup();
+        LocalBroadcastManager.getInstance(this).sendBroadcast(
+                new Intent(BROADCAST_VPN_STATE).putExtra("running", false));
         Log.i(TAG, "Stopped");
     }
 
-    private void cleanup()
-    {
+    private void setupVPN() {
+        if (vpnInterface == null) {
+            Builder builder = new Builder();
+            builder.addAddress(VPN_ADDRESS, 32);
+            builder.addRoute(VPN_ROUTE, 0);
+            vpnInterface = builder.setSession(getString(R.string.app_name)).setConfigureIntent(
+                    pendingIntent).establish();
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        disconnect();
+    }
+
+    private void cleanup() {
         deviceToNetworkTCPQueue = null;
         deviceToNetworkUDPQueue = null;
         networkToDeviceQueue = null;
         ByteBufferPool.clear();
         closeResources(udpSelector, tcpSelector, vpnInterface);
+        vpnInterface = null;
     }
 
     // TODO: Move this to a "utils" class for reuse
-    private static void closeResources(Closeable... resources)
-    {
-        for (Closeable resource : resources)
-        {
-            try
-            {
+    private static void closeResources(Closeable... resources) {
+        for (Closeable resource : resources) {
+            try {
                 resource.close();
-            }
-            catch (IOException e)
-            {
+            } catch (IOException e) {
                 // Ignore
             }
         }
     }
 
-    private static class VPNRunnable implements Runnable
-    {
+    private static class VPNRunnable implements Runnable {
         private static final String TAG = VPNRunnable.class.getSimpleName();
 
         private FileDescriptor vpnFileDescriptor;
@@ -158,10 +165,9 @@ public class LocalVPNService extends VpnService
         private ConcurrentLinkedQueue<ByteBuffer> networkToDeviceQueue;
 
         public VPNRunnable(FileDescriptor vpnFileDescriptor,
-                           ConcurrentLinkedQueue<Packet> deviceToNetworkUDPQueue,
-                           ConcurrentLinkedQueue<Packet> deviceToNetworkTCPQueue,
-                           ConcurrentLinkedQueue<ByteBuffer> networkToDeviceQueue)
-        {
+                ConcurrentLinkedQueue<Packet> deviceToNetworkUDPQueue,
+                ConcurrentLinkedQueue<Packet> deviceToNetworkTCPQueue,
+                ConcurrentLinkedQueue<ByteBuffer> networkToDeviceQueue) {
             this.vpnFileDescriptor = vpnFileDescriptor;
             this.deviceToNetworkUDPQueue = deviceToNetworkUDPQueue;
             this.deviceToNetworkTCPQueue = deviceToNetworkTCPQueue;
@@ -169,20 +175,17 @@ public class LocalVPNService extends VpnService
         }
 
         @Override
-        public void run()
-        {
+        public void run() {
             Log.i(TAG, "Started");
 
             FileChannel vpnInput = new FileInputStream(vpnFileDescriptor).getChannel();
             FileChannel vpnOutput = new FileOutputStream(vpnFileDescriptor).getChannel();
 
-            try
-            {
+            try {
                 ByteBuffer bufferToNetwork = null;
                 boolean dataSent = true;
                 boolean dataReceived;
-                while (!Thread.interrupted())
-                {
+                while (!Thread.interrupted()) {
                     if (dataSent)
                         bufferToNetwork = ByteBufferPool.acquire();
                     else
@@ -190,43 +193,73 @@ public class LocalVPNService extends VpnService
 
                     // TODO: Block when not connected
                     int readBytes = vpnInput.read(bufferToNetwork);
-                    if (readBytes > 0)
-                    {
+                    if (readBytes > 0) {
                         dataSent = true;
                         bufferToNetwork.flip();
                         Packet packet = new Packet(bufferToNetwork);
-                        if (packet.isUDP())
-                        {
+                        if (packet.isUDP()) {
+                            Log.e(TAG,
+                                    "sent: UDP " + packet.ip4Header.destinationAddress.getHostAddress() + ":" + packet.udpHeader.destinationPort + " - " + readBytes);
                             deviceToNetworkUDPQueue.offer(packet);
-                        }
-                        else if (packet.isTCP())
-                        {
+                        } else if (packet.isTCP()) {
+                            if (packet.tcpHeader.destinationPort == 80) {
+                                String flags = getFlagsInString(packet);
+                                int payloadLength = packet.ip4Header.totalLength - packet.ip4Header.headerLength - packet.tcpHeader.headerLength;
+                                Log.e(TAG,
+                                        "redirected: TCP "
+                                                + (TextUtils.isEmpty(flags) ? "" : "(" + flags + ") ")
+                                                + packet.ip4Header.destinationAddress.getHostAddress()
+                                                + ":" + packet.tcpHeader.destinationPort
+                                                + " - " + readBytes
+                                                + " (IP:" + packet.ip4Header.headerLength
+                                                + ", TCP:" + packet.tcpHeader.headerLength
+                                                + ", payload:" + payloadLength
+                                                + ") - " + packet.ip4Header.destinationAddress.getHostName());
+//                                packet.ip4Header.destinationAddress = Inet4Address.getByName(PROXY_ADDRESS);
+//                                packet.updateIP4Checksum();
+//                                packet.tcpHeader.destinationPort = PROXY_PORT;
+//                                packet.updateTCPChecksum(payloadLength);
+                            }
+
                             deviceToNetworkTCPQueue.offer(packet);
-                        }
-                        else
-                        {
+                        } else {
                             Log.w(TAG, "Unknown packet type");
                             Log.w(TAG, packet.ip4Header.toString());
                             dataSent = false;
                         }
-                    }
-                    else
-                    {
+                    } else {
                         dataSent = false;
                     }
 
                     ByteBuffer bufferFromNetwork = networkToDeviceQueue.poll();
-                    if (bufferFromNetwork != null)
-                    {
+                    if (bufferFromNetwork != null) {
                         bufferFromNetwork.flip();
+
+                        Packet packet = new Packet(bufferToNetwork);
+                        if (packet.isTCP()) {
+                            String flags = getFlagsInString(packet);
+                            int payloadLength = packet.ip4Header.totalLength - packet.ip4Header.headerLength - packet.tcpHeader.headerLength;
+                            Log.e(TAG, "            received TCP: "
+                                    + (TextUtils.isEmpty(flags) ? "" : "(" + flags + ") ")
+                                    + packet.ip4Header.destinationAddress.getHostAddress()
+                                    + ":" + packet.tcpHeader.destinationPort
+                                    + " - " + readBytes
+                                    + " (IP:" + packet.ip4Header.headerLength
+                                    + ", TCP:" + packet.tcpHeader.headerLength
+                                    + ", payload:" + payloadLength
+                                    + ") - " + packet.ip4Header.destinationAddress.getHostName());
+                        } else if (packet.isUDP()) {
+                            Log.w(TAG, "            received UDP");
+                        } else {
+                            Log.w(TAG, "            received other");
+                        }
+
                         while (bufferFromNetwork.hasRemaining())
                             vpnOutput.write(bufferFromNetwork);
                         dataReceived = true;
 
                         ByteBufferPool.release(bufferFromNetwork);
-                    }
-                    else
-                    {
+                    } else {
                         dataReceived = false;
                     }
 
@@ -235,19 +268,36 @@ public class LocalVPNService extends VpnService
                     if (!dataSent && !dataReceived)
                         Thread.sleep(10);
                 }
-            }
-            catch (InterruptedException e)
-            {
+            } catch (InterruptedException e) {
                 Log.i(TAG, "Stopping");
-            }
-            catch (IOException e)
-            {
+            } catch (IOException e) {
                 Log.w(TAG, e.toString(), e);
-            }
-            finally
-            {
+            } finally {
                 closeResources(vpnInput, vpnOutput);
             }
+        }
+
+        private String getFlagsInString(Packet packet) {
+            StringBuilder flags = new StringBuilder();
+            if (packet.tcpHeader.isSYN()) {
+                flags.append("SYN ");
+            }
+            if (packet.tcpHeader.isACK()) {
+                flags.append("ACK ");
+            }
+            if (packet.tcpHeader.isFIN()) {
+                flags.append("FIN ");
+            }
+            if (packet.tcpHeader.isPSH()) {
+                flags.append("PSH ");
+            }
+            if (packet.tcpHeader.isRST()) {
+                flags.append("RST ");
+            }
+            if (packet.tcpHeader.isURG()) {
+                flags.append("URG ");
+            }
+            return flags.toString();
         }
     }
 }

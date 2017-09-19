@@ -142,7 +142,7 @@ public class Packet
         updateIP4Checksum();
     }
 
-    private void updateIP4Checksum()
+    public void updateIP4Checksum()
     {
         ByteBuffer buffer = backingBuffer.duplicate();
         buffer.position(0);
@@ -165,7 +165,7 @@ public class Packet
         backingBuffer.putShort(10, (short) sum);
     }
 
-    private void updateTCPChecksum(int payloadSize)
+    public void updateTCPChecksum(int payloadSize)
     {
         int sum = 0;
         int tcpLength = TCP_HEADER_SIZE + payloadSize;
