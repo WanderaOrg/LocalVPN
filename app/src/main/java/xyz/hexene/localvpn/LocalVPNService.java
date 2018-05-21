@@ -1,18 +1,18 @@
 /*
-** Copyright 2015, Mohamed Naufal
-**
-** Licensed under the Apache License, Version 2.0 (the "License");
-** you may not use this file except in compliance with the License.
-** You may obtain a copy of the License at
-**
-**     http://www.apache.org/licenses/LICENSE-2.0
-**
-** Unless required by applicable law or agreed to in writing, software
-** distributed under the License is distributed on an "AS IS" BASIS,
-** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-** See the License for the specific language governing permissions and
-** limitations under the License.
-*/
+ ** Copyright 2015, Mohamed Naufal
+ **
+ ** Licensed under the Apache License, Version 2.0 (the "License");
+ ** you may not use this file except in compliance with the License.
+ ** You may obtain a copy of the License at
+ **
+ **     http://www.apache.org/licenses/LICENSE-2.0
+ **
+ ** Unless required by applicable law or agreed to in writing, software
+ ** distributed under the License is distributed on an "AS IS" BASIS,
+ ** WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ ** See the License for the specific language governing permissions and
+ ** limitations under the License.
+ */
 
 package xyz.hexene.localvpn;
 
@@ -29,6 +29,8 @@ import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.Selector;
@@ -64,6 +66,8 @@ public class LocalVPNService extends VpnService {
     private Selector udpSelector;
     private Selector tcpSelector;
 
+    private DatagramSocket datagramSocket;
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && STOP.equals(intent.getAction())) {
@@ -90,13 +94,16 @@ public class LocalVPNService extends VpnService {
             deviceToNetworkTCPQueue = new ConcurrentLinkedQueue<>();
             networkToDeviceQueue = new ConcurrentLinkedQueue<>();
 
+            datagramSocket = new DatagramSocket();
+            protect(datagramSocket);
+
             executorService = Executors.newFixedThreadPool(5);
             executorService.submit(new UDPInput(networkToDeviceQueue, udpSelector));
             executorService.submit(new UDPOutput(deviceToNetworkUDPQueue, udpSelector, this));
             executorService.submit(new TCPInput(networkToDeviceQueue, tcpSelector));
             executorService.submit(new TCPOutput(deviceToNetworkTCPQueue, networkToDeviceQueue, tcpSelector, this));
             executorService.submit(new VPNRunnable(vpnInterface.getFileDescriptor(),
-                    deviceToNetworkUDPQueue, deviceToNetworkTCPQueue, networkToDeviceQueue));
+                    deviceToNetworkUDPQueue, deviceToNetworkTCPQueue, networkToDeviceQueue, datagramSocket));
             LocalBroadcastManager.getInstance(this).sendBroadcast(
                     new Intent(BROADCAST_VPN_STATE).putExtra("running", true));
             Log.i(TAG, "Started");
@@ -148,7 +155,9 @@ public class LocalVPNService extends VpnService {
     private static void closeResources(Closeable... resources) {
         for (Closeable resource : resources) {
             try {
-                resource.close();
+                if (resource != null) {
+                    resource.close();
+                }
             } catch (IOException e) {
                 // Ignore
             }
@@ -156,6 +165,7 @@ public class LocalVPNService extends VpnService {
     }
 
     private static class VPNRunnable implements Runnable {
+
         private static final String TAG = VPNRunnable.class.getSimpleName();
 
         private FileDescriptor vpnFileDescriptor;
@@ -163,15 +173,18 @@ public class LocalVPNService extends VpnService {
         private ConcurrentLinkedQueue<Packet> deviceToNetworkUDPQueue;
         private ConcurrentLinkedQueue<Packet> deviceToNetworkTCPQueue;
         private ConcurrentLinkedQueue<ByteBuffer> networkToDeviceQueue;
+        private DatagramSocket datagramSocket;
 
         public VPNRunnable(FileDescriptor vpnFileDescriptor,
                 ConcurrentLinkedQueue<Packet> deviceToNetworkUDPQueue,
                 ConcurrentLinkedQueue<Packet> deviceToNetworkTCPQueue,
-                ConcurrentLinkedQueue<ByteBuffer> networkToDeviceQueue) {
+                ConcurrentLinkedQueue<ByteBuffer> networkToDeviceQueue,
+                DatagramSocket datagramSocket) {
             this.vpnFileDescriptor = vpnFileDescriptor;
             this.deviceToNetworkUDPQueue = deviceToNetworkUDPQueue;
             this.deviceToNetworkTCPQueue = deviceToNetworkTCPQueue;
             this.networkToDeviceQueue = networkToDeviceQueue;
+            this.datagramSocket = datagramSocket;
         }
 
         @Override
@@ -202,24 +215,31 @@ public class LocalVPNService extends VpnService {
                                     "sent: UDP " + packet.ip4Header.destinationAddress.getHostAddress() + ":" + packet.udpHeader.destinationPort + " - " + readBytes);
                             deviceToNetworkUDPQueue.offer(packet);
                         } else if (packet.isTCP()) {
-                            if (packet.tcpHeader.destinationPort == 80) {
-                                String flags = getFlagsInString(packet);
-                                int payloadLength = packet.ip4Header.totalLength - packet.ip4Header.headerLength - packet.tcpHeader.headerLength;
-                                Log.e(TAG,
-                                        "redirected: TCP "
-                                                + (TextUtils.isEmpty(flags) ? "" : "(" + flags + ") ")
-                                                + packet.ip4Header.destinationAddress.getHostAddress()
-                                                + ":" + packet.tcpHeader.destinationPort
-                                                + " - " + readBytes
-                                                + " (IP:" + packet.ip4Header.headerLength
-                                                + ", TCP:" + packet.tcpHeader.headerLength
-                                                + ", payload:" + payloadLength
-                                                + ") - " + packet.ip4Header.destinationAddress.getHostName());
+//                            if (packet.tcpHeader.destinationPort == 80) {
+                            String flags = getFlagsInString(packet);
+                            int payloadLength = packet.ip4Header.totalLength - packet.ip4Header.headerLength - packet.tcpHeader.headerLength;
+                            Log.e(TAG,
+                                    "sent: TCP "
+                                            + (TextUtils.isEmpty(flags) ? "" : "(" + flags + ") ")
+                                            + packet.ip4Header.destinationAddress.getHostAddress()
+                                            + ":" + packet.tcpHeader.destinationPort
+                                            + " - " + readBytes
+                                            + " (IP:" + packet.ip4Header.headerLength
+                                            + ", TCP:" + packet.tcpHeader.headerLength
+                                            + ", payload:" + payloadLength
+                                            + ") - " + packet.ip4Header.destinationAddress.getHostName());
 //                                packet.ip4Header.destinationAddress = Inet4Address.getByName(PROXY_ADDRESS);
 //                                packet.updateIP4Checksum();
 //                                packet.tcpHeader.destinationPort = PROXY_PORT;
 //                                packet.updateTCPChecksum(payloadLength);
-                            }
+//                            }
+
+                            DatagramPacket datagramPacket = new DatagramPacket(
+                                    bufferToNetwork.array(),
+                                    bufferToNetwork.limit(),
+                                    packet.ip4Header.destinationAddress,
+                                    packet.tcpHeader.destinationPort);
+                            datagramSocket.send(datagramPacket);
 
                             deviceToNetworkTCPQueue.offer(packet);
                         } else {
@@ -231,11 +251,18 @@ public class LocalVPNService extends VpnService {
                         dataSent = false;
                     }
 
-                    ByteBuffer bufferFromNetwork = networkToDeviceQueue.poll();
+
+                    ByteBuffer bufferFromNetwork;
+
+
+//                    DatagramPacket incomingDatagramPacket = new DatagramPacket(bufferFromNetwork.array(), );
+//                    datagramSocket.receive(incomingDatagramPacket);
+
+                    bufferFromNetwork = networkToDeviceQueue.poll();
                     if (bufferFromNetwork != null) {
                         bufferFromNetwork.flip();
 
-                        Packet packet = new Packet(bufferToNetwork);
+                        Packet packet = new Packet(bufferFromNetwork);
                         if (packet.isTCP()) {
                             String flags = getFlagsInString(packet);
                             int payloadLength = packet.ip4Header.totalLength - packet.ip4Header.headerLength - packet.tcpHeader.headerLength;

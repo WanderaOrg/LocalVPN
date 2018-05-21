@@ -39,6 +39,21 @@ public class LocalVPN extends AppCompatActivity {
             if (LocalVPNService.BROADCAST_VPN_STATE.equals(intent.getAction())) {
                 vpnRunningOrStarting = intent.getBooleanExtra("running", false);
                 updateConnectButton();
+//                if (vpnRunningOrStarting) {
+//                    new Handler().postDelayed(new Runnable() {
+//                        @Override public void run() {
+//                            Log.e("Handler", "stopping from broadcast");
+//                            stopVpnService();
+//                        }
+//                    }, 2000);
+//                } else {
+//                    new Handler().postDelayed(new Runnable() {
+//                        @Override public void run() {
+//                            Log.e("Handler", "starting from broadcast");
+//                            startVpnService();
+//                        }
+//                    }, 2000);
+//                }
             }
         }
     };
